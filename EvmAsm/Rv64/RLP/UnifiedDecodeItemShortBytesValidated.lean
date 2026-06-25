@@ -30,6 +30,7 @@ open EvmAsm.EL.RLP
 open EvmAsm.EL.RLP.ByteStringDecodeBridge
 open EvmAsm.Rv64.Tactics
 
+set_option maxRecDepth 8000 in
 /-- The bound-check `BLTU x11, x15` taken condition `ult (ofNat len) (ofNat L)` is exactly the
     Nat fact `len < L`, given both fit in 64 bits. -/
 private theorem ult_ofNat_len (len L : Nat) (hlen : len < 2 ^ 64) (hL : L < 2 ^ 64) :
@@ -309,5 +310,59 @@ example (regionBase base e2_target : Word) (off1 off2 succOff : BitVec 13)
                (CodeReq.singleton (e2_target + 8) (.BLTU .x11 .x15 succOff))) :=
   rlp_decode_shortBytes_validated (0x83 : Byte) [0x61, 0x62, 0x63] 0 0 0 0 regionBase
     off1 off2 succOff base e2_target (by decide) (by decide) hover htarget hd_phase3 hd_bltu
+
+-- ============================================================================
+-- B.1b — full shortBytes validating decoder (covers the singleton canonical case).
+-- ============================================================================
+
+set_option maxRecDepth 8000 in
+/-- `decode` success for a shortBytes header whose payload fits and is canonical. -/
+private theorem sbf_decode_some (pfx : Byte) (rest : List Byte)
+    (h_class : classifyPrefix pfx = .shortBytes)
+    (hfit : rlpPrefixShortBytesPayloadLen pfx < (pfx :: rest).length)
+    (hcanon : (match rest.take (rlpPrefixShortBytesPayloadLen pfx) with
+                | [b] => ¬ b.toNat < 0x80 | _ => True)) :
+    decode (pfx :: rest)
+      = some (.bytes (rest.take (rlpPrefixShortBytesPayloadLen pfx)),
+              rest.drop (rlpPrefixShortBytesPayloadLen pfx)) := by
+  set len := rlpPrefixShortBytesPayloadLen pfx
+  have hle : len ≤ rest.length := by simp only [List.length_cons] at hfit; omega
+  have htake : takeBytes rest len = some (rest.take len, rest.drop len) := by
+    unfold takeBytes; rw [if_pos (by omega)]
+  rw [decode_cons_eq_decodeAux_fuel, show 2 * rest.length + 2 = (2 * rest.length + 1) + 1 from rfl,
+      decodeAux_cons_shortBytes_eq_some_iff (2 * rest.length + 1) pfx rest h_class
+        (rest.take len) (rest.drop len)]
+  exact ⟨rest.take len, htake, rfl, hcanon⟩
+
+set_option maxRecDepth 8000 in
+/-- `decode` rejects a shortBytes header whose declared payload does not fit. -/
+private theorem sbf_decode_none_bound (pfx : Byte) (rest : List Byte)
+    (h_class : classifyPrefix pfx = .shortBytes)
+    (hnofit : ¬ rlpPrefixShortBytesPayloadLen pfx < (pfx :: rest).length) :
+    decode (pfx :: rest) = none := by
+  set len := rlpPrefixShortBytesPayloadLen pfx
+  have hgt : rest.length < len := by simp only [List.length_cons] at hnofit; omega
+  have htake : takeBytes rest len = none := by unfold takeBytes; rw [if_neg (by omega)]
+  rw [decode_cons_eq_decodeAux_fuel, show 2 * rest.length + 2 = (2 * rest.length + 1) + 1 from rfl]
+  exact decodeAux_cons_shortBytes_eq_none_of_takeBytes_none (2 * rest.length + 1) pfx rest h_class htake
+
+set_option maxRecDepth 8000 in
+/-- `decode` rejects a non-canonical singleton shortBytes (`payloadLen = 1`, payload byte `< 0x80`). -/
+private theorem sbf_decode_none_singleton (pfx : Byte) (rest : List Byte)
+    (h_class : classifyPrefix pfx = .shortBytes)
+    (h1 : rlpPrefixShortBytesPayloadLen pfx = 1)
+    (hfit : (1 : Nat) < (pfx :: rest).length)
+    (hshort : (rest[0]'(by simp only [List.length_cons] at hfit; omega)).toNat < 0x80) :
+    decode (pfx :: rest) = none := by
+  have hrest : 0 < rest.length := by simp only [List.length_cons] at hfit; omega
+  have htake : takeBytes rest (rlpPrefixShortBytesPayloadLen pfx)
+      = some ([rest[0]'(by omega)], rest.drop 1) := by
+    rw [h1]; unfold takeBytes; rw [if_pos (by omega)]
+    cases rest with
+    | nil => simp at hrest
+    | cons a t => simp
+  rw [decode_cons_eq_decodeAux_fuel, show 2 * rest.length + 2 = (2 * rest.length + 1) + 1 from rfl]
+  exact decodeAux_cons_shortBytes_eq_none_of_singleton_short (2 * rest.length + 1) pfx
+    (rest[0]'(by omega)) rest (rest.drop 1) h_class htake hshort
 
 end EvmAsm.Rv64.RLP
