@@ -365,4 +365,17 @@ private theorem sbf_decode_none_singleton (pfx : Byte) (rest : List Byte)
   exact decodeAux_cons_shortBytes_eq_none_of_singleton_short (2 * rest.length + 1) pfx
     (rest[0]'(by omega)) rest (rest.drop 1) h_class htake hshort
 
+-- x12 = ofNat len + signExtend12 (-1) is zero iff len = 1 (len ≤ 55 < 2^64).
+set_option maxRecDepth 8000 in
+private theorem addi_dec_zero_iff (len : Nat) (hlen : len ≤ 55) :
+    (BitVec.ofNat 64 len + signExtend12 (-(1 : BitVec 12)) = (0 : Word)) ↔ len = 1 := by
+  rw [se12_neg1]
+  constructor
+  · intro h
+    have h1 : BitVec.ofNat 64 len = (1 : Word) := by bv_omega
+    have h2 := congrArg BitVec.toNat h1
+    rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)] at h2
+    simpa using h2
+  · intro h; subst h; bv_omega
+
 end EvmAsm.Rv64.RLP
