@@ -176,6 +176,124 @@ theorem rlp_decode_shortBytes_validated
     have hgoal := (sepConj_pure_right h).2 ⟨hregs, hnone hnu⟩
     xperm_hyp hgoal
 
+/-- `signExtend12 (-(1 : BitVec 12)) = -(1 : Word)` (the `ADDI x12, x11, -1` decrement). -/
+theorem se12_neg1 : signExtend12 (-(1 : BitVec 12)) = (-1 : Word) := by decide
+
+/-- `signExtend12 0x80 = 0x80` (the `ANDI x12, x12, 0x80` mask is positive). -/
+theorem se12_0x80 : signExtend12 (0x80 : BitVec 12) = (0x80 : Word) := by decide
+
+/-- A byte whose bit 7 is clear (`& 0x80 = 0`) is `< 0x80`. Exhaustive `decide` over 256 bytes. -/
+theorem byte_and_0x80_zero_imp_lt (b : Byte)
+    (h : (b.zeroExtend 64) &&& (0x80 : Word) = 0) : b.toNat < 0x80 := by
+  revert h; revert b; decide
+
+/-- Converse: a byte `< 0x80` has bit 7 clear, so masking with `0x80` yields `0`.
+    Proved by exhaustive `decide` over the 256 byte values. -/
+theorem byte_lt_0x80_imp_zext_and_0x80_eq_zero (b : Byte)
+    (hlt : b.toNat < 0x80) : (b.zeroExtend 64) &&& (0x80 : Word) = 0 := by
+  revert hlt; revert b; decide
+
+/-- **Singleton canonical byte-check sub-branch** (the `LBU ⨾ ANDI 0x80 ⨟ BEQ` tail). Reads the
+    single payload byte at `regionBase + 1` (the shortBytes singleton payload pointer), masks bit 7,
+    and branches: TAKEN (`BEQ`, byte `< 0x80`) ⇒ non-canonical ⇒ the FAIL exit; FALL (byte `≥ 0x80`)
+    ⇒ canonical ⇒ the success-ward exit. Used by the full validating shortBytes decoder for the
+    `payloadLen = 1` case. -/
+theorem shortBytes_canon_byteChk_within
+    (regionBase v12 : Word) (bs : List Byte) (base : Word) (failOff : BitVec 13)
+    (halign : regionBase.toNat % 8 = 0) (h1lt : 1 < bs.length)
+    (_hover : regionBase.toNat + bs.length < 2 ^ 64)
+    (hvalid1 : isValidByteAccess (regionBase + BitVec.ofNat 64 1) = true)
+    (hd1 : (CodeReq.singleton base (.LBU .x12 .x13 0)).Disjoint
+            (CodeReq.singleton (base + 4) (.ANDI .x12 .x12 0x80)))
+    (hd2 : ((CodeReq.singleton base (.LBU .x12 .x13 0)).union
+              (CodeReq.singleton (base + 4) (.ANDI .x12 .x12 0x80))).Disjoint
+            (CodeReq.singleton (base + 8) (.BEQ .x12 .x0 failOff))) :
+    cpsBranchWithin 3 base
+      (((CodeReq.singleton base (.LBU .x12 .x13 0)).union
+          (CodeReq.singleton (base + 4) (.ANDI .x12 .x12 0x80))).union
+        (CodeReq.singleton (base + 8) (.BEQ .x12 .x0 failOff)))
+      ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) ** (.x12 ↦ᵣ v12) ** (.x0 ↦ᵣ (0 : Word)) **
+        bytesRegion regionBase bs)
+      -- TAKEN (byte < 0x80): non-canonical → FAIL
+      ((base + 8) + signExtend13 failOff)
+        ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+          (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+          bytesRegion regionBase bs ** ⌜(bs[1]'h1lt).toNat < 0x80⌝)
+      -- FALL (byte ≥ 0x80): canonical → success-ward
+      (base + 12)
+        ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+          (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+          bytesRegion regionBase bs ** ⌜¬ (bs[1]'h1lt).toNat < 0x80⌝) := by
+  -- LBU x12, x13, 0 (base → base+4): x12 := bs[1].
+  have lbuS : cpsTripleWithin 1 base (base + 4)
+      (CodeReq.singleton base (.LBU .x12 .x13 0))
+      ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) ** (.x12 ↦ᵣ v12) ** (.x0 ↦ᵣ (0 : Word)) **
+        bytesRegion regionBase bs)
+      ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) ** (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64)) **
+        (.x0 ↦ᵣ (0 : Word)) ** bytesRegion regionBase bs) :=
+    cpsTripleWithin_weaken (fun _ hp => by xperm_hyp hp) (fun _ hp => by xperm_hyp hp)
+      (cpsTripleWithin_frameR (.x0 ↦ᵣ (0 : Word)) (by pcFree)
+        (bytesRegion_lbu_within .x12 .x13 regionBase v12 base bs 1 (by nofun)
+          halign h1lt (by omega) hvalid1))
+  -- ANDI x12, x12, 0x80 (base+4 → base+8): x12 := bs[1] &&& 0x80.
+  have andiS : cpsTripleWithin 1 (base + 4) (base + 8)
+      (CodeReq.singleton (base + 4) (.ANDI .x12 .x12 0x80))
+      ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) ** (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64)) **
+        (.x0 ↦ᵣ (0 : Word)) ** bytesRegion regionBase bs)
+      ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+        (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+        bytesRegion regionBase bs) := by
+    have andi_raw := andi_spec_gen_same_within .x12 ((bs[1]'h1lt).zeroExtend 64) 0x80 (base + 4) (by nofun)
+    rw [se12_0x80, show (base + 4 : Word) + 4 = base + 8 from by bv_omega] at andi_raw
+    exact cpsTripleWithin_weaken (fun _ hp => by xperm_hyp hp) (fun _ hp => by xperm_hyp hp)
+      (cpsTripleWithin_frameR
+        ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) ** (.x0 ↦ᵣ (0 : Word)) ** bytesRegion regionBase bs)
+        (by exact pcFree_sepConj pcFree_regIs (pcFree_sepConj pcFree_regIs (bytesRegion_pcFree _ _)))
+        andi_raw)
+  -- BEQ x12, x0, failOff (base+8): taken ⟺ x12 = 0 ⟺ bs[1] < 0x80; convert the pure conjuncts.
+  have beqS : cpsBranchWithin 1 (base + 8)
+      (CodeReq.singleton (base + 8) (.BEQ .x12 .x0 failOff))
+      ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+        (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+        bytesRegion regionBase bs)
+      ((base + 8) + signExtend13 failOff)
+        ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+          (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+          bytesRegion regionBase bs ** ⌜(bs[1]'h1lt).toNat < 0x80⌝)
+      (base + 12)
+        ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+          (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+          bytesRegion regionBase bs ** ⌜¬ (bs[1]'h1lt).toNat < 0x80⌝) := by
+    have beq_raw := beq_spec_gen_within .x12 .x0 failOff ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))
+      (0 : Word) (base + 8)
+    rw [show (base + 8 : Word) + 4 = base + 12 from by bv_omega] at beq_raw
+    refine cpsBranchWithin_weaken (fun _ hp => by xperm_hyp hp) ?tk ?fl
+      (cpsBranchWithin_frameR
+        ((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) ** bytesRegion regionBase bs)
+        (by exact pcFree_sepConj pcFree_regIs (bytesRegion_pcFree _ _)) beq_raw)
+    case tk =>
+      intro h hp
+      have hp' : (((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+          (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+          bytesRegion regionBase bs) **
+          ⌜((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word)) = (0 : Word)⌝) h := by xperm_hyp hp
+      obtain ⟨hregs, heq0⟩ := (sepConj_pure_right h).1 hp'
+      have hlt : (bs[1]'h1lt).toNat < 0x80 := byte_and_0x80_zero_imp_lt _ heq0
+      have hgoal := (sepConj_pure_right h).2 ⟨hregs, hlt⟩
+      xperm_hyp hgoal
+    case fl =>
+      intro h hp
+      have hp' : (((.x13 ↦ᵣ (regionBase + BitVec.ofNat 64 1)) **
+          (.x12 ↦ᵣ ((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word))) ** (.x0 ↦ᵣ (0 : Word)) **
+          bytesRegion regionBase bs) **
+          ⌜((bs[1]'h1lt).zeroExtend 64 &&& (0x80 : Word)) ≠ (0 : Word)⌝) h := by xperm_hyp hp
+      obtain ⟨hregs, hne0⟩ := (sepConj_pure_right h).1 hp'
+      have hge : ¬ (bs[1]'h1lt).toNat < 0x80 :=
+        fun hlt => hne0 (byte_lt_0x80_imp_zext_and_0x80_eq_zero _ hlt)
+      have hgoal := (sepConj_pure_right h).2 ⟨hregs, hge⟩
+      xperm_hyp hgoal
+  exact cpsTripleWithin_seq_cpsBranchWithin hd2 (cpsTripleWithin_seq hd1 lbuS andiS) beqS
+
 -- Concrete cross-check: the validating decoder applies to a 3-byte short string `0x83 'a''b''c'`
 -- (`classifyPrefix 0x83 = .shortBytes`, payload length `3 ≠ 1`), discharged by `decide`; the
 -- address/disjointness side-conditions ride as parameters (a concrete program discharges them).
